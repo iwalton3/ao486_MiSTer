@@ -1,3 +1,28 @@
+# Changes from upstream
+
+ao486 with direct_video and 480i support via scaler, for all your NTSC video needs (not tested on PAL)
+
+This is an experimental build of ao486 that:
+- supports and *forces* direct_video output
+- supports custom video modes (direct_video must be set to 0 for this to work due to video_modes being ignored otherwise)
+- supports interlaced 480i output via scaler (option in OSD)
+- interlaced should also work via analog io board, but was not tested
+
+Example config:
+
+```ini
+[ao486]
+direct_video=0
+composite_sync=1
+vscale_mode=0
+vscale_border=20
+video_mode=640,36,64,60,240,1,3,14,12380
+```
+
+If there is upstream interest in this, there are two commits. Remove that last one and the core will only route video to direct_video when enabled, and vga_scaler instead of being overridden by direct_video, will instead route the video signal through the scaler and out via direct_video. This is requires because composite sync is broken normally when direct_video=0 because it thinks the output is a regular HDMI connection.
+
+The second commit was needed because Main_MiSTer forces a specific modeline when direct_video is enabled.
+
 # ao486 port for MiSTer by Sorgelig.
 
 MiSTer port of the ao486 core originally written by Aleksander Osman, which has been greatly reworked with many new features and performance added.
