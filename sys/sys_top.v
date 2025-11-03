@@ -293,7 +293,7 @@ reg        cfg_set      = 0;
 	wire    direct_video = 1;
 `else
 	wire    vga_fb       = cfg[12] | vga_force_scaler;
-	wire    direct_video = cfg[10];
+	wire    direct_video = 1; // Forced to 1 for analog-only core (use video_mode)
 `endif
 
 wire       audio_96k    = cfg[6];
