@@ -52,6 +52,7 @@ module emu
 	output        VGA_F1,
 	output [1:0]  VGA_SL,
 	output        VGA_SCALER, // Force VGA scaler
+	output        VGA_INTERLACED, // Interlaced 480i mode
 	output        VGA_DISABLE, // analog out is off
 
 	input  [11:0] HDMI_WIDTH,
@@ -217,6 +218,7 @@ localparam CONF_STR =
 	"P1-;",
 	"P1OMN,Aspect ratio,Original,Full Screen,[ARC1],[ARC2];",
 	"P1O4,VSync,60Hz,Variable;",
+	"P1OB,Interlaced Mode,Off,On;",
 	"P1O8,16/24bit mode,BGR,RGB;",
 	"P1O9,16bit format,1555,565;",
 	"P1OE,Low-Res,Native,4x;",
@@ -586,6 +588,7 @@ wire uart2_dcd = ~user_io_mode | USER_IN[6];
 assign VGA_F1 = 0;
 assign VGA_SL = 0;
 assign VGA_SCALER = 1;
+assign VGA_INTERLACED = status[11];
 assign CLK_VIDEO = clk_vga;
 assign CE_PIXEL = vga_ce;
 

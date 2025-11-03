@@ -151,6 +151,7 @@ ENTITY ascal IS
 		o_b   : OUT unsigned(7 DOWNTO 0);
 		o_hs  : OUT std_logic; -- H sync
 		o_vs  : OUT std_logic; -- V sync
+		o_fl  : OUT std_logic; -- Interlaced field
 		o_de  : OUT std_logic; -- Display Enable
 		o_vbl : OUT std_logic; -- V blank
 		o_brd : OUT std_logic; -- border enable
@@ -223,6 +224,7 @@ ENTITY ascal IS
 		vrr     : IN std_logic := '0';
 		vrrmax  : IN natural RANGE 0 TO 4095 := 0;
 		swblack : IN std_logic := '0';        -- will output 3 black frame on every resolution switch
+		vinterlace : IN std_logic := '0';     -- Force interlaced output mode
 
 		-- Scaler format. 00=16bpp 565, 01=24bpp 10=32bpp
 		format  : IN unsigned(1 DOWNTO 0) :="01";
@@ -485,6 +487,8 @@ ARCHITECTURE rtl OF ascal IS
 	SIGNAL o_dshi : natural RANGE 0 TO 3;
 	SIGNAL o_first,o_last,o_last1,o_last2 : std_logic;
 	SIGNAL o_lastt1,o_lastt2,o_lastt3,o_lastt4 : std_logic;
+	SIGNAL o_field : std_logic := '0';  -- Interlaced field tracking
+	SIGNAL o_vsync_hstart : uint12;     -- Vsync horizontal start position (offset for field 1)
 	SIGNAL o_alt,o_altx : unsigned(3 DOWNTO 0);
 	SIGNAL o_hdown,o_vdown : std_logic;
 	SIGNAL o_primv,o_lastv,o_bibv : unsigned(0 TO 2);
@@ -1844,7 +1848,12 @@ BEGIN
 			o_hmin   <=hmin; -- <ASYNC> ?
 			o_hmax   <=hmax; -- <ASYNC> ?
 
-			o_vtotal <=vtotal; -- <ASYNC> ?
+			-- Interlaced: vtotal+1 for Field 1
+			IF vinterlace='1' AND o_field='1' THEN
+				o_vtotal <=vtotal + 1;
+			ELSE
+				o_vtotal <=vtotal;
+			END IF;
 			o_vsstart<=vsstart; -- <ASYNC> ?
 			o_vsend  <=vsend; -- <ASYNC> ?
 			o_vdisp  <=vdisp; -- <ASYNC> ?
@@ -1852,7 +1861,12 @@ BEGIN
 			o_vmax   <=vmax; -- <ASYNC> ?
 
 			o_hsize  <=o_hmax - o_hmin + 1;
-			o_vsize  <=o_vmax - o_vmin + 1;
+			-- Interlaced: scale to 480p then select alternating lines per field
+			IF vinterlace='1' THEN
+				o_vsize  <=(o_vmax - o_vmin + 1) * 2;
+			ELSE
+				o_vsize  <=o_vmax - o_vmin + 1;
+			END IF;
 
 			o_vrr    <=vrr;
 			o_vrrmax <= vrrmax;
@@ -1998,7 +2012,12 @@ BEGIN
 			o_adrsa<='0';
 			o_adrsb<=o_adrsa;
 
-			o_vacc_ini<=(o_vsize - o_ivsize + 8192) MOD 8192;
+			-- Interlaced: offset vacc_ini to select alternate field lines
+			IF vinterlace='1' AND o_field='0' THEN
+				o_vacc_ini<=((o_vsize - o_ivsize) + 2*o_ivsize + 8192) MOD 8192;
+			ELSE
+				o_vacc_ini<=(o_vsize - o_ivsize + 8192) MOD 8192;
+			END IF;
 			o_hacc_ini<=(o_hsize + o_ihsize + 8192) MOD 8192;
 
 			--Alternate phase
@@ -2026,7 +2045,12 @@ BEGIN
 						END IF;
 					END IF;
 					IF dif_v>=8192 THEN
-						o_vacc_next<=(o_vacc_next + 2*o_ivsize) MOD 8192;
+						-- Interlaced: 4*ivsize step selects every other line
+						IF vinterlace='1' THEN
+							o_vacc_next<=(o_vacc_next + 4*o_ivsize) MOD 8192;
+						ELSE
+							o_vacc_next<=(o_vacc_next + 2*o_ivsize) MOD 8192;
+						END IF;
 						vcarry_v:=false;
 					ELSE
 						o_vacc_next<=dif_v;
@@ -2035,6 +2059,7 @@ BEGIN
 
 					IF o_vcpt_pre2=o_vmin THEN
 						o_vacc     <=o_vacc_ini;
+						-- Read all lines; field selection in vertical scaler
 						o_vacc_next<=o_vacc_ini + 2*o_ivsize;
 						o_vacpt <=x"001";
 						o_vacptl<="01";
@@ -2671,6 +2696,10 @@ BEGIN
 
 					IF o_vcpt_pre3+1>=o_vtotal THEN
 						o_vcpt_pre3<=0;
+						-- Toggle field at start of each frame when interlaced
+						IF vinterlace='1' THEN
+							o_field <= NOT o_field;
+						END IF;
 					ELSIF o_vrr_sync2 THEN
 						o_vcpt_pre3<=o_vsstart;
 						o_sync<=false;
@@ -2688,9 +2717,23 @@ BEGIN
 				o_pev(0)<=to_std_logic(o_hcpt>=o_hmin AND o_hcpt<=o_hmax AND
 											  o_vcpt>=o_vmin AND o_vcpt<=o_vmax);
 				o_hsv(0)<=to_std_logic(o_hcpt>=o_hsstart AND o_hcpt<o_hsend);
-				o_vsv(0)<=to_std_logic((o_vcpt=o_vsstart AND o_hcpt>=o_hsstart) OR
-											  (o_vcpt>o_vsstart AND o_vcpt<o_vsend) OR
-											  (o_vcpt=o_vsend   AND o_hcpt<o_hsstart));
+
+				-- Interlaced: Field 0 vsync offset, Field 1 normal
+				IF vinterlace='1' AND o_field='0' THEN
+					IF o_hsstart + (o_htotal / 2) >= o_htotal THEN
+						o_vsync_hstart <= (o_hsstart + (o_htotal / 2)) - o_htotal;
+					ELSE
+						o_vsync_hstart <= o_hsstart + (o_htotal / 2);
+					END IF;
+					o_vsv(0)<=to_std_logic((o_vcpt=o_vsstart AND o_hcpt>=o_vsync_hstart) OR
+												  (o_vcpt>o_vsstart AND o_vcpt<o_vsend) OR
+												  (o_vcpt=o_vsend   AND o_hcpt<o_vsync_hstart));
+				ELSE
+					o_vsync_hstart <= o_hsstart;
+					o_vsv(0)<=to_std_logic((o_vcpt=o_vsstart AND o_hcpt>=o_hsstart) OR
+												  (o_vcpt>o_vsstart AND o_vcpt<o_vsend) OR
+												  (o_vcpt=o_vsend   AND o_hcpt<o_hsstart));
+				END IF;
 
 				o_vss<=to_std_logic(o_vcpt_pre2>=o_vmin AND o_vcpt_pre2<=o_vmax);
 				o_hsv(1 TO 11)<=o_hsv(0 TO 10);
@@ -2865,6 +2908,7 @@ BEGIN
 				o_hs<=o_hsv(11);
 				o_vs<=o_vsv(11);
 				o_de<=o_dev(11);
+				o_fl<=o_field;
 				o_vbl<=o_end(11);
 				o_r<=x"00";
 				o_g<=x"00";

@@ -298,6 +298,7 @@ reg        cfg_set      = 0;
 
 wire       audio_96k    = cfg[6];
 wire       csync_en     = cfg[3];
+wire       vga_interlaced; // From emu (status[11])
 wire       io_osd_vga   = io_ss1 & ~io_ss2;
 `ifndef MISTER_DUAL_SDRAM
 	wire    ypbpr_en     = cfg[5];
@@ -678,6 +679,7 @@ wire         vbuf_write;
 
 wire  [23:0] hdmi_data;
 wire         hdmi_vs, hdmi_hs, hdmi_de, hdmi_vbl, hdmi_brd;
+wire         hdmi_fl;  // Interlaced field signal
 wire         freeze;
 
 `ifndef MISTER_DEBUG_NOHDMI
@@ -728,6 +730,7 @@ wire         freeze;
 		.himax    (0),
 		.vimin    (0),
 		.vimax    (0),
+		.vinterlace(vga_interlaced),
 
 		.o_clk    (clk_hdmi),
 		.o_ce     (scaler_out),
@@ -737,6 +740,7 @@ wire         freeze;
 		.o_hs     (hdmi_hs),
 		.o_vs     (hdmi_vs),
 		.o_de     (hdmi_de),
+		.o_fl     (hdmi_fl),
 		.o_vbl    (hdmi_vbl),
 		.o_brd    (hdmi_brd),
 		.o_lltune (lltune),
@@ -1230,8 +1234,9 @@ end
 wire hdmi_tx_clk;
 `ifndef MISTER_DEBUG_NOHDMI
 	cyclonev_clkselect hdmi_clk_sw
-	( 
-		.clkselect({1'b1, ~vga_fb & direct_video}),
+	(
+		// vga_scaler=1: use hdmi_clk_out, else clk_vid
+		.clkselect({1'b1, ~(~vga_fb & vga_scaler)}),
 		.inclk({clk_vid, hdmi_clk_out, 2'b00}),
 		.outclk(hdmi_tx_clk)
 	);
@@ -1269,28 +1274,37 @@ reg hdmi_out_vs;
 reg hdmi_out_de;
 reg [23:0] hdmi_out_d;
 
-always @(posedge hdmi_tx_clk) begin
-	reg [23:0] hdmi_dv_data;
-	reg        hdmi_dv_hs, hdmi_dv_vs, hdmi_dv_de;
+// Composite sync for direct_video path
+wire hdmi_dv_cs;
+reg [23:0] hdmi_dv_data;
+reg        hdmi_dv_hs, hdmi_dv_vs, hdmi_dv_de;
+reg        hdmi_dv_fl;
 
-	reg hs,vs,de;
+// Composite sync with serrated vsync for interlaced
+csync csync_dv(hdmi_tx_clk, hdmi_dv_hs, hdmi_dv_vs, hdmi_dv_cs);
+
+always @(posedge hdmi_tx_clk) begin
+	reg hs,vs,de,fl;
 	reg [23:0] d;
-	
-	hdmi_dv_data <= dv_data;
-	hdmi_dv_hs   <= dv_hs;
-	hdmi_dv_vs   <= dv_vs;
-	hdmi_dv_de   <= dv_de;
-	
+
+	hdmi_dv_data <= vga_scaler ? hdmi_data_osd : dv_data;
+	hdmi_dv_hs   <= vga_scaler ? hdmi_hs_osd   : dv_hs;
+	hdmi_dv_vs   <= vga_scaler ? hdmi_vs_osd   : dv_vs;
+	hdmi_dv_de   <= vga_scaler ? hdmi_de_osd   : dv_de;
+	hdmi_dv_fl   <= vga_scaler ? hdmi_fl : 1'b0;
+
 `ifndef MISTER_DEBUG_NOHDMI
-	hs <= (~vga_fb & direct_video) ? hdmi_dv_hs   : (direct_video & csync_en) ? hdmi_cs_osd : hdmi_hs_osd;
-	vs <= (~vga_fb & direct_video) ? hdmi_dv_vs   : hdmi_vs_osd;
+	hs <= (~vga_fb & direct_video) ? (csync_en ? hdmi_dv_cs : hdmi_dv_hs) : (direct_video & csync_en) ? hdmi_cs_osd : hdmi_hs_osd;
+	vs <= (~vga_fb & direct_video) ? (csync_en ? 1'b1 : hdmi_dv_vs) : hdmi_vs_osd;  // Force VS high when composite sync enabled
 	de <= (~vga_fb & direct_video) ? hdmi_dv_de   : hdmi_de_osd;
 	d  <= (~vga_fb & direct_video) ? hdmi_dv_data : hdmi_data_osd;
+	fl <= (~vga_fb & direct_video) ? hdmi_dv_fl   : hdmi_fl;
 `else
 	hs <= hdmi_dv_hs;
 	vs <= hdmi_dv_vs;
 	de <= hdmi_dv_de;
 	d  <= hdmi_dv_data;
+	fl <= hdmi_dv_fl;
 `endif
 
 	hdmi_out_hs <= hs;
@@ -1640,6 +1654,7 @@ wire  [1:0] scanlines;
 wire  [7:0] r_out, g_out, b_out, hr_out, hg_out, hb_out;
 wire        vs_fix, hs_fix, de_emu, vs_emu, hs_emu, f1;
 wire        hvs_fix, hhs_fix, hde_emu;
+wire        f1_out; // Field signal for HPS_BUS (from scaler when interlaced)
 wire        clk_vid, ce_pix, clk_ihdmi, ce_hpix;
 wire        vga_force_scaler;
 
@@ -1712,11 +1727,14 @@ reg  [1:0] sl_r;
 wire [1:0] sl = sl_r;
 always @(posedge clk_sys) sl_r <= FB_EN ? 2'b00 : scanlines;
 
+// Select field signal: use scaler's field when interlaced, else core's field
+assign f1_out = vga_interlaced ? hdmi_fl : f1;
+
 emu emu
 (
 	.CLK_50M(FPGA_CLK2_50),
 	.RESET(reset),
-	.HPS_BUS({fb_en, sl, f1, HDMI_TX_VS, 
+	.HPS_BUS({fb_en, sl, f1_out, HDMI_TX_VS,
 				 clk_100m, clk_ihdmi,
 				 ce_hpix, hde_emu, hhs_fix, hvs_fix, 
 				 io_wait, clk_sys, io_fpga, io_uio, io_strobe, io_wide, io_din, io_dout}),
@@ -1729,6 +1747,7 @@ emu emu
 	.VGA_DE(de_emu),
 	.VGA_F1(f1),
 	.VGA_SCALER(vga_force_scaler),
+	.VGA_INTERLACED(vga_interlaced),
 
 `ifndef MISTER_DUAL_SDRAM
 	.VGA_DISABLE(VGA_DISABLE),
