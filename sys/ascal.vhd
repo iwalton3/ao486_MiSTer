@@ -435,6 +435,11 @@ ARCHITECTURE rtl OF ascal IS
 	SIGNAL o_vcpt_sync,o_vcpt_sync2, o_vrrmax : uint12;
 	SIGNAL o_sync, o_sync_max : boolean;
 	SIGNAL o_vmin,o_vmax,o_vdisp : uint12;
+	-- Hardcoded interlaced scaling
+	TYPE scale_mode_t IS (SCALE_NORMAL, SCALE_1_0, SCALE_1_5, SCALE_2_0, SCALE_3_0, SCALE_4_0);
+	SIGNAL o_scale_mode : scale_mode_t := SCALE_NORMAL;
+	SIGNAL o_use_hardcoded : std_logic := '0';
+	SIGNAL o_vmin_adjusted, o_vmax_adjusted : uint12;
 	SIGNAL o_divcpt : natural RANGE 0 TO 36;
 	SIGNAL o_iendframe0,o_iendframe02,o_iendframe1,o_iendframe12 : std_logic;
 	SIGNAL o_bufup0,o_bufup1,o_inter : std_logic;
@@ -1825,6 +1830,12 @@ BEGIN
 		VARIABLE hcarry_v,vcarry_v : boolean;
 		VARIABLE dif_v : natural RANGE 0 TO 8*OHRES-1;
 		VARIABLE off_v : natural RANGE 0 TO 15;
+		VARIABLE scale_x2_v : natural RANGE 0 TO 15;
+		VARIABLE relative_scanline_v : natural RANGE 0 TO 4095;
+		VARIABLE snap_scale_x2_v : natural RANGE 0 TO 15;
+		VARIABLE needed_window_v : natural RANGE 0 TO 4095;
+		VARIABLE border_adjust_v : natural RANGE 0 TO 4095;
+		VARIABLE hardcoded_line_v : natural RANGE 0 TO 4095;
 	BEGIN
 		IF o_reset_na='0' THEN
 			o_copy<=sWAIT;
@@ -1857,15 +1868,70 @@ BEGIN
 			o_vsstart<=vsstart; -- <ASYNC> ?
 			o_vsend  <=vsend; -- <ASYNC> ?
 			o_vdisp  <=vdisp; -- <ASYNC> ?
-			o_vmin   <=vmin; -- <ASYNC> ?
-			o_vmax   <=vmax; -- <ASYNC> ?
 
 			o_hsize  <=o_hmax - o_hmin + 1;
-			-- Interlaced: scale to 480p then select alternating lines per field
-			IF vinterlace='1' THEN
-				o_vsize  <=(o_vmax - o_vmin + 1) * 2;
+
+			-- Interlaced: hardcoded scaling with border snapping
+			IF vinterlace='1' AND o_ivsize > 0 THEN
+				-- Scale in half-ints (×2): interlaced frame = 2× field window
+				scale_x2_v := ((vmax - vmin + 1) * 4) / o_ivsize;
+
+				-- Snap to safe scales: 1.0, 1.5, 2.0, 3.0, 4.0. Bresenham for downscaling.
+				IF scale_x2_v >= 8 THEN
+					snap_scale_x2_v := 8;  -- 4.0×
+					o_scale_mode <= SCALE_4_0;
+				ELSIF scale_x2_v >= 6 THEN
+					snap_scale_x2_v := 6;  -- 3.0×
+					o_scale_mode <= SCALE_3_0;
+				ELSIF scale_x2_v >= 4 THEN
+					snap_scale_x2_v := 4;  -- 2.0×
+					o_scale_mode <= SCALE_2_0;
+				ELSIF scale_x2_v >= 3 THEN
+					snap_scale_x2_v := 3;  -- 1.5×
+					o_scale_mode <= SCALE_1_5;
+				ELSIF scale_x2_v >= 2 THEN
+					snap_scale_x2_v := 2;  -- 1.0×
+					o_scale_mode <= SCALE_1_0;
+				ELSE
+					snap_scale_x2_v := 0;
+					o_scale_mode <= SCALE_NORMAL;
+					o_use_hardcoded <= '0';
+				END IF;
+
+				-- Adjust borders for exact scale
+				IF snap_scale_x2_v > 0 THEN
+					o_use_hardcoded <= '1';
+					needed_window_v := (o_ivsize * snap_scale_x2_v) / 4;
+
+					IF needed_window_v <= (vmax - vmin + 1) THEN
+						border_adjust_v := ((vmax - vmin + 1) - needed_window_v) / 2;
+						o_vmin <= vmin + border_adjust_v;
+						o_vmax <= vmax - border_adjust_v;
+						o_vmin_adjusted <= vmin + border_adjust_v;
+						o_vmax_adjusted <= vmax - border_adjust_v;
+						o_vsize <= needed_window_v * 2;
+					ELSE
+						o_vmin <= vmin;
+						o_vmax <= vmax;
+						o_vmin_adjusted <= vmin;
+						o_vmax_adjusted <= vmax;
+						o_vsize <= (vmax - vmin + 1) * 2;
+					END IF;
+				ELSE
+					o_vmin <= vmin;
+					o_vmax <= vmax;
+					o_vmin_adjusted <= vmin;
+					o_vmax_adjusted <= vmax;
+					o_vsize <= (vmax - vmin + 1) * 2;
+				END IF;
 			ELSE
-				o_vsize  <=o_vmax - o_vmin + 1;
+				o_scale_mode <= SCALE_NORMAL;
+				o_use_hardcoded <= '0';
+				o_vmin <= vmin;
+				o_vmax <= vmax;
+				o_vmin_adjusted <= vmin;
+				o_vmax_adjusted <= vmax;
+				o_vsize <= vmax - vmin + 1;
 			END IF;
 
 			o_vrr    <=vrr;
@@ -2058,19 +2124,53 @@ BEGIN
 					END IF;
 
 					IF o_vcpt_pre2=o_vmin THEN
-						o_vacc     <=o_vacc_ini;
-						-- Read all lines; field selection in vertical scaler
-						o_vacc_next<=o_vacc_ini + 2*o_ivsize;
-						o_vacpt <=x"001";
+						IF o_use_hardcoded='0' THEN
+							o_vacc     <=o_vacc_ini;
+							o_vacc_next<=o_vacc_ini + 2*o_ivsize;
+							o_vacpt <=x"001";
+						ELSE
+							o_vacpt <=x"000";
+						END IF;
 						o_vacptl<="01";
 						vcarry_v:=false;
 					END IF;
 
-					IF vcarry_v THEN
-						o_vacpt<=o_vacpt+1;
-					END IF;
-					IF vcarry_v AND o_prim THEN
-						o_vacptl<=o_vacptl+1;
+					IF o_use_hardcoded='0' THEN
+						IF vcarry_v THEN
+							o_vacpt<=o_vacpt+1;
+						END IF;
+						IF vcarry_v AND o_prim THEN
+							o_vacptl<=o_vacptl+1;
+						END IF;
+					ELSE
+						-- Hardcoded scaling: map output line to input line
+						relative_scanline_v := o_vcpt_pre2 - o_vmin_adjusted;
+
+						CASE o_scale_mode IS
+							WHEN SCALE_1_0 =>  -- 1.0× (480p→480i)
+								IF o_field = '0' THEN
+									hardcoded_line_v := relative_scanline_v * 2 + 1;
+								ELSE
+									hardcoded_line_v := relative_scanline_v * 2;
+								END IF;
+							WHEN SCALE_1_5 =>  -- 1.5× (320p→480i)
+								hardcoded_line_v := (relative_scanline_v * 4) / 3;
+							WHEN SCALE_2_0 =>  -- 2.0× (240p→480i)
+								hardcoded_line_v := relative_scanline_v;
+							WHEN SCALE_3_0 =>  -- 3.0× (160p→480i)
+								hardcoded_line_v := (relative_scanline_v * 2) / 3;
+							WHEN SCALE_4_0 =>  -- 4.0× (120p→480i)
+								hardcoded_line_v := relative_scanline_v / 2;
+							WHEN OTHERS =>
+								hardcoded_line_v := 0;
+						END CASE;
+
+						o_vacpt <= to_unsigned(hardcoded_line_v, o_vacpt'length);
+
+						-- Still track vacptl for frame management
+						IF vcarry_v AND o_prim THEN
+							o_vacptl<=o_vacptl+1;
+						END IF;
 					END IF;
 					o_vcarrym <= o_vcarrym OR vcarry_v;
 					o_prim <= false;
