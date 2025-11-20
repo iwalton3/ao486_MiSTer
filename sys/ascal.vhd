@@ -1902,7 +1902,6 @@ BEGIN
 				IF snap_scale_x2_v > 0 THEN
 					o_use_hardcoded <= '1';
 					needed_window_v := (o_ivsize * snap_scale_x2_v) / 4;
-
 					IF needed_window_v <= (vmax - vmin + 1) THEN
 						border_adjust_v := ((vmax - vmin + 1) - needed_window_v) / 2;
 						o_vmin <= vmin + border_adjust_v;
@@ -2154,7 +2153,11 @@ BEGIN
 									hardcoded_line_v := relative_scanline_v * 2;
 								END IF;
 							WHEN SCALE_1_5 =>  -- 1.5× (320p→480i)
-								hardcoded_line_v := (relative_scanline_v * 4) / 3;
+								IF o_field = '0' THEN
+									hardcoded_line_v := (relative_scanline_v * 8 + 7) / 6;
+								ELSE
+									hardcoded_line_v := (relative_scanline_v * 8 + 3) / 6;
+								END IF;
 							WHEN SCALE_2_0 =>  -- 2.0× (240p→480i)
 								hardcoded_line_v := relative_scanline_v;
 							WHEN SCALE_3_0 =>  -- 3.0× (160p→480i)
